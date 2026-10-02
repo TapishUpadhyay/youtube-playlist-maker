@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Channel Playlist Maker</title>
+<style>
+:root{--bg:#fff;--fg:#111;--mut:#666;--card:#f3f3f5;--acc:#e11d2e}
+@media(prefers-color-scheme:dark){:root{--bg:#121214;--fg:#eee;--mut:#999;--card:#1e1e22}}
+*{box-sizing:border-box}body{margin:0;font:16px system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+main{max-width:1100px;margin:0 auto;padding:20px}
+h1{font-size:22px;margin:0 0 14px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+input{flex:1;min-width:220px;padding:11px;border-radius:8px;border:1px solid var(--mut);background:var(--card);color:var(--fg);font-size:15px}
+button{padding:11px 16px;border:0;border-radius:8px;background:var(--acc);color:#fff;font-weight:600;cursor:pointer}
+button.alt{background:var(--card);color:var(--fg)}
+#status{color:var(--mut);margin:8px 0}
+#app{display:none;grid-template-columns:1.6fr 1fr;gap:16px}
+@media(max-width:800px){#app{grid-template-columns:1fr}}
+.box{aspect-ratio:16/9;background:#000;border-radius:10px;overflow:hidden}
+#player{width:100%;height:100%}
+#list{max-height:70vh;overflow:auto;margin-top:8px}
+.it{display:flex;gap:8px;padding:8px;border-radius:8px;cursor:pointer;font-size:14px}
+.it:hover,.it.on{background:var(--card)}.it.on{outline:2px solid var(--acc)}
+.it b{color:var(--mut);min-width:34px;font-weight:500}.it small{color:var(--mut)}
+.batches a{display:inline-block;margin:4px 6px 0 0;padding:6px 10px;background:var(--card);border-radius:6px;color:var(--fg);text-decoration:none;font-size:13px}
+</style></head><body><main>
+<h1>Channel Playlist Maker</h1>
+<div class="row"><input id="url" placeholder="Paste channel link, e.g. youtube.com/@channelname"></div>
+<div class="row"><button onclick="go('new')">Newest → Oldest</button><button onclick="go('old')">Oldest → Newest</button></div>
+<div id="status"></div>
+<div id="app">
+ <div><div class="box"><div id="player"></div></div>
+  <h3 id="now"></h3>
+  <div class="row"><button class="alt" onclick="flip()">Reverse order</button><button class="alt" onclick="prev()">⏮ Prev</button><button class="alt" onclick="next()">Next ⏭</button></div>
+  <details><summary>Open in YouTube (50 per batch)</summary><div class="batches" id="batches"></div></details>
+ </div>
+ <div><input id="q" placeholder="Search in this channel" oninput="render()"><div id="list"></div></div>
+</div>
+</main>
+<script>
+let all=[],order='new',cur=null,done=false,yt=null,ready=false,run=0;
+const $=id=>document.getElementById(id);
+const view=()=>order==='new'?all:all.slice().reverse();
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function go(o){
+  const me=++run;order=o;all=[];cur=null;done=false;
+  $('app').style.display='none';
+  const u=$('url').value.trim(); if(!u){$('status').textContent='Paste a channel link first.';return}
+  $('status').textContent='Loading channel…';
+  try{
+    let r=await(await fetch('/api/videos?channel='+encodeURIComponent(u))).json();
+    if(r.error)throw Error(r.error);
+    const seen=new Set();const add=l=>{l.forEach(v=>{if(v.id&&!seen.has(v.id)){seen.add(v.id);all.push(v)}});all.sort((a,b)=>b.date.localeCompare(a.date))};
+    add(r.videos);let token=r.next,started=false;
+    const show=()=>{if(started||!all.length)return;if(order==='new'||!token){started=true;$('app').style.display='grid';play(view()[0].id)}};
+    while(true){
+      if(me!==run)return;
+      $('status').textContent=`${r.title}: ${all.length} videos loaded${token?'…':' (complete)'}`;
+      show();render();
+      if(!token)break;
+      const n=await(await fetch(`/api/videos?playlist=${r.playlist}&pageToken=${encodeURIComponent(token)}`)).json();
+      if(n.error){$('status').textContent='Stopped at '+all.length+' videos: '+n.error;break}
+      add(n.videos);token=n.next;
+    }
+    done=true;show();render();batches();
+    if(!all.length)$('status').textContent='No videos found on this channel.';
+  }catch(e){$('status').textContent='Error: '+e.message}
+}
+function render(){
+  const q=$('q').value.toLowerCase(),l=view();
+  $('list').innerHTML=l.map((v,i)=>({v,i})).filter(x=>!q||x.v.title.toLowerCase().includes(q)).map(x=>
+   `<div class="it ${x.v.id===cur?'on':''}" onclick="play('${x.v.id}')"><b>${x.i+1}</b><span>${esc(x.v.title)}<br><small>${new Date(x.v.date).toLocaleDateString(undefined,{year:"numeric",month:"short",day:"numeric"})}</small></span></div>`).join('');
+}
+function batches(){
+  const l=view(),b=[];
+  for(let i=0;i<l.length;i+=50)b.push(`<a target="_blank" rel="noopener" href="https://www.youtube.com/watch_videos?video_ids=${l.slice(i,i+50).map(v=>v.id).join(',')}">${i+1}–${Math.min(i+50,l.length)}</a>`);
+  $('batches').innerHTML=b.join('');
+}
+function play(id){
+  cur=id;const v=all.find(x=>x.id===id);$('now').textContent=v?v.title:'';render();
+  if(!window.YT||!YT.Player){const s=document.createElement('script');s.src='https://www.youtube.com/iframe_api';document.head.appendChild(s);window.onYouTubeIframeAPIReady=()=>play(cur);return}
+  if(!yt){yt=new YT.Player('player',{width:'100%',height:'100%',videoId:id,playerVars:{autoplay:1,rel:0},events:{onStateChange:e=>{if(e.data===0)next()},onError:()=>next()}})}
+  else yt.loadVideoById(id);
+}
+function step(d){const l=view(),i=l.findIndex(v=>v.id===cur);if(l[i+d])play(l[i+d].id)}
+const next=()=>step(1),prev=()=>step(-1);
+function flip(){order=order==='new'?'old':'new';render();batches()}
+$('url').addEventListener('keydown',e=>{if(e.key==='Enter')go('new')});
+</script></body></html>
