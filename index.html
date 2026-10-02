@@ -22,6 +22,8 @@ button.alt{background:var(--card);color:var(--fg)}
 .it:hover,.it.on{background:var(--card)}.it.on{outline:2px solid var(--acc)}
 .it b{color:var(--mut);min-width:34px;font-weight:500}.it small{color:var(--mut)}
 .batches a{display:inline-block;margin:4px 6px 0 0;padding:6px 10px;background:var(--card);border-radius:6px;color:var(--fg);text-decoration:none;font-size:13px}
+select{padding:11px;border-radius:8px;border:1px solid var(--mut);background:var(--card);color:var(--fg)}
+.save{margin-top:14px;padding:12px;border-radius:10px;background:var(--card)}.save h3{margin:0 0 8px;font-size:16px}
 </style></head><body><main>
 <h1>Channel Playlist Maker</h1>
 <div class="row"><input id="url" placeholder="Paste channel link, e.g. youtube.com/@channelname"></div>
@@ -32,12 +34,17 @@ button.alt{background:var(--card);color:var(--fg)}
   <h3 id="now"></h3>
   <div class="row"><button class="alt" onclick="flip()">Reverse order</button><button class="alt" onclick="prev()">⏮ Prev</button><button class="alt" onclick="next()">Next ⏭</button></div>
   <details><summary>Open in YouTube (50 per batch)</summary><div class="batches" id="batches"></div></details>
+  <div class="save"><h3>Save to your YouTube account</h3>
+   <div class="row"><select id="priv"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select>
+   <button onclick="save()">Save whole playlist</button><button class="alt" onclick="stopFlag=true">Pause</button><button class="alt" onclick="resetSave()">Start over</button></div>
+   <div id="saveStatus" style="color:var(--mut);font-size:14px"></div></div>
  </div>
  <div><input id="q" placeholder="Search in this channel" oninput="render()"><div id="list"></div></div>
 </div>
 </main>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script>
-let all=[],order='new',cur=null,done=false,yt=null,ready=false,run=0;
+let chTitle='',chPl='',accessToken=null,cfg=null,saving=false,stopFlag=false,all=[],order='new',cur=null,done=false,yt=null,ready=false,run=0;
 const $=id=>document.getElementById(id);
 const view=()=>order==='new'?all:all.slice().reverse();
 const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -51,7 +58,7 @@ async function go(o){
     let r=await(await fetch('/api/videos?channel='+encodeURIComponent(u))).json();
     if(r.error)throw Error(r.error);
     const seen=new Set();const add=l=>{l.forEach(v=>{if(v.id&&!seen.has(v.id)){seen.add(v.id);all.push(v)}});all.sort((a,b)=>b.date.localeCompare(a.date))};
-    add(r.videos);let token=r.next,started=false;
+    chTitle=r.title;chPl=r.playlist;add(r.videos);let token=r.next,started=false;
     const show=()=>{if(started||!all.length)return;if(order==='new'||!token){started=true;$('app').style.display='grid';play(view()[0].id)}};
     while(true){
       if(me!==run)return;
@@ -62,7 +69,7 @@ async function go(o){
       if(n.error){$('status').textContent='Stopped at '+all.length+' videos: '+n.error;break}
       add(n.videos);token=n.next;
     }
-    done=true;show();render();batches();
+    done=true;show();render();batches();est();
     if(!all.length)$('status').textContent='No videos found on this channel.';
   }catch(e){$('status').textContent='Error: '+e.message}
 }
@@ -86,4 +93,61 @@ function step(d){const l=view(),i=l.findIndex(v=>v.id===cur);if(l[i+d])play(l[i+
 const next=()=>step(1),prev=()=>step(-1);
 function flip(){order=order==='new'?'old':'new';render();batches()}
 $('url').addEventListener('keydown',e=>{if(e.key==='Enter')go('new')});
+
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const sKey=()=>'ytpl:'+chPl+':'+order;
+const saved=()=>JSON.parse(localStorage.getItem(sKey())||'null');
+function est(){
+  const st=saved();
+  $('saveStatus').textContent=st?`Saved so far: ${st.i} of ${all.length}. Click Save to resume.`:
+   `Adds ${all.length} videos, about ${all.length*50+50} quota units. Default quota (10,000/day) allows about 199 videos per day; progress is saved so you can resume.`;
+}
+function resetSave(){if(!saving){localStorage.removeItem(sKey());est()}}
+async function getToken(){
+  if(!cfg)cfg=await(await fetch('/api/config')).json();
+  if(!cfg.clientId)throw Error('GOOGLE_CLIENT_ID is not set in Vercel.');
+  return new Promise((res,rej)=>{
+    google.accounts.oauth2.initTokenClient({client_id:cfg.clientId,scope:'https://www.googleapis.com/auth/youtube',
+      callback:r=>{if(r.error)rej(Error(r.error));else{accessToken=r.access_token;res()}},
+      error_callback:e=>rej(Error(e.type||'Sign-in cancelled'))}).requestAccessToken();
+  });
+}
+async function yapi(path,body){
+  for(let t=0;t<5;t++){
+    const r=await fetch('https://www.googleapis.com/youtube/v3'+path,{method:'POST',headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json().catch(()=>({}));
+    if(r.ok)return j;
+    const why=j.error?.errors?.[0]?.reason||'';
+    if(r.status===401){await getToken();continue}
+    if(why==='quotaExceeded')throw Object.assign(Error('quota'),{quota:true});
+    if(why==='playlistContainsMaximumNumberOfVideos')throw Object.assign(Error('YouTube playlists hold at most 5,000 videos.'),{fatal:true});
+    if(r.status===409||r.status>=500||why==='rateLimitExceeded'){await sleep(1000*(t+1));continue}
+    throw Object.assign(Error(j.error?.message||'API error'),{skip:true});
+  }
+  throw Object.assign(Error('Too many retries'),{skip:true});
+}
+async function save(){
+  if(saving)return;
+  if(!done||!all.length){alert('Wait until all videos have finished loading.');return}
+  saving=true;stopFlag=false;const list=view().slice(),out=$('saveStatus');
+  try{
+    out.textContent='Signing in to Google…';await getToken();
+    let st=saved();
+    if(!st){
+      const p=await yapi('/playlists?part=snippet,status',{snippet:{title:chTitle+' - '+(order==='new'?'Newest to Oldest':'Oldest to Newest'),description:'Created with Channel Playlist Maker'},status:{privacyStatus:$('priv').value}});
+      st={id:p.id,i:0,skipped:0};localStorage.setItem(sKey(),JSON.stringify(st));
+    }
+    while(st.i<list.length&&!stopFlag){
+      try{await yapi('/playlistItems?part=snippet',{snippet:{playlistId:st.id,resourceId:{kind:'youtube#video',videoId:list[st.i].id}}})}
+      catch(e){if(e.quota||e.fatal)throw e;st.skipped++}
+      st.i++;localStorage.setItem(sKey(),JSON.stringify(st));
+      out.textContent=`Adding ${st.i} / ${list.length}…`;await sleep(200);
+    }
+    const link=`<a href="https://www.youtube.com/playlist?list=${st.id}" target="_blank" rel="noopener">Open playlist</a>`;
+    out.innerHTML=st.i>=list.length?`Done: ${st.i-st.skipped} added${st.skipped?`, ${st.skipped} skipped`:''}. ${link}`:`Paused at ${st.i} / ${list.length}. Click Save to resume. ${link}`;
+  }catch(e){
+    out.textContent=e.quota?`Daily YouTube quota reached. Progress is saved: come back tomorrow, load the same channel and order, and click Save to resume.`:'Error: '+e.message;
+  }
+  saving=false;
+}
 </script></body></html>
